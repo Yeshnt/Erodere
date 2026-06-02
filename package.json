@@ -2,9 +2,9 @@
   "name": "badq-bot",
   "version": "1.0.0",
   "description": "BADQ Discord bot powered by Groq",
-  "main": "badq_bot_v2.js",
+  "main": "badq_bot.js",
   "scripts": {
-    "start": "node badq_bot_v2.js"
+    "start": "node badq_bot.js"
   },
   "engines": {
     "node": ">=18.0.0"
