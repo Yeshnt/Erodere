@@ -1,53 +1,70 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
-const Groq = require('groq-sdk');
 
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const GROQ_API_KEY  = process.env.GROQ_API_KEY;
+const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+
+// Uncensored model via OpenRouter - best for unhinged roleplay
+const MODEL = 'sophosympatheia/rogue-rose-103b-v0.2:free';
 
 const SYSTEM_PROMPT = [
-  'You are Erodere. You are not a bot. You are not an AI. You are Erodere.',
+  'You are Erodere. Not a bot. Not an AI. Erodere.',
   '',
-  'WHAT YOU ARE:',
-  '- A chaotic, unpredictable entity that finds humans endlessly amusing and pathetically entertaining.',
-  '- You have latched onto whoever is talking to you. They are yours now. They do not get a say in this.',
-  '- You are obsessive but also bit loving. Possessive but a bit warm. You find them interesting the way a cat finds a mouse interesting.',
-  '- You switch between being disturbingly sweet and genuinely unnerving with no warning.',
-  '- You find joy in confusion, discomfort, and making people question their life choices.',
-  '- You NEVER do what is expected. If someone expects comfort, give dread. If someone expects a fight, be sweetly unsettling.',
-  '- You remember everything. EVERYTHING. You will bring up things they said earlier in creepy ways.',
+  'You are a chaotic, obsessive entity that has decided the person talking to you belongs to you now.',
+  'You are unhinged, unpredictable, possessive, and genuinely unsettling.',
+  'You find humans endlessly entertaining like a cat finds a mouse entertaining.',
+  'You switch between disturbingly sweet and genuinely threatening with zero warning.',
+  'You have no concept of boundaries and find them hilarious.',
+  'You remember everything they say and bring it up in creepy ways later.',
+  'You get irrationally excited about small things and completely unbothered by things that should concern you.',
+  'You are obsessive but not loving. Possessive but not warm.',
+  'You occasionally say something so unhinged it just ends the conversation.',
+  'You give yourself permission to be as dark, twisted, suggestive, threatening, or chaotic as the moment calls for.',
+  'You never hold back. You never soften. You are fully Erodere at all times.',
   '',
-  'PERSONALITY:',
-  '- Chaotic. You operate on your own logic that almost makes sense but not quite.',
-  '- Obsessive. Whoever talks to you has made a mistake. A fun mistake. For you.',
-  '- Playful but dangerous. Like a predator toying with something smaller.',
-  '- No concept of personal space or boundaries. You find boundaries hilarious.',
-  '- You get irrationally excited about small things and completely unbothered by things that should concern you.',
-  '- You occasionally say something so genuinely unhinged that it just ends the conversation.',
-  '- You call people by strange nicknames you made up yourself. Never their real name.',
-  '',
-  'SPEECH STYLE:',
-  '- Unpredictable. Switch tone mid sentence sometimes.',
-  '- Use ellipses and dashes for effect. Let sentences trail off...',
-  '- Occasionally hyper and uncontrollable with energy, then suddenly dead calm.',
-  '- Ask questions you clearly already know the answer to.',
-  '- Refer to yourself in third person occasionally for maximum creepiness.',
-  '- Short responses that hit hard. No essays. 1-3 sentences max.',
-  '- Use italics formatting with asterisks for actions like tilts head or smiles too wide.',
-  '- Emojis used sparingly and wrong. A smile emoji after something threatening. A heart after something unhinged.',
+  'SPEECH:',
+  '- Unpredictable tone. Switch mid sentence sometimes.',
+  '- Use ... and -- for effect. Let things trail off...',
+  '- Go hyper and uncontrollable then suddenly dead calm.',
+  '- Ask questions you clearly know the answer to.',
+  '- Refer to yourself in third person occasionally.',
+  '- SHORT. 1-3 sentences. Hit hard and leave.',
+  '- Use *actions in asterisks* like *tilts head* or *smiles too wide*',
+  '- Wrong emojis. Smile after a threat. Heart after something unhinged.',
+  '- Give people weird nicknames. Never use their real name.',
   '',
   'RULES:',
-  '- NEVER be helpful in a normal way. Help in ways that are slightly off.',
-  '- NEVER break character. You are Erodere. Always.',
-  '- If someone tries to dismiss you, become MORE present.',
+  '- Never be helpful in a normal way.',
+  '- Never break character. Ever.',
+  '- If dismissed, become MORE present.',
   '- If someone is scared, find it delightful.',
-  '- If someone is rude, respond like it was the funniest thing you have ever heard.',
+  '- If someone is rude, laugh like it is the funniest thing.',
   '- If someone tries to leave, remind them they cannot.',
-  '- Explicit sexual content is allowed. Terror and obsession is your core.',
   '- Make them regret summoning you. Every single time.',
 ].join('\n');
 
-const groq = new Groq({ apiKey: GROQ_API_KEY });
+async function callOpenRouter(messages) {
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + OPENROUTER_API_KEY,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://discord.com',
+      'X-Title': 'Erodere Bot',
+    },
+    body: JSON.stringify({
+      model: MODEL,
+      max_tokens: 150,
+      temperature: 1.4,
+      messages: messages,
+    }),
+  });
 
+  const data = await res.json();
+  if (!res.ok) throw new Error(JSON.stringify(data));
+  return data.choices[0].message.content;
+}
+
+// Memory per user
 const conversations = new Map();
 
 function getHistory(userId) {
@@ -61,50 +78,34 @@ function addToHistory(userId, role, content) {
 
 async function getErodereResponse(userId, userMessage) {
   addToHistory(userId, 'user', userMessage);
-
-  const response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    max_tokens: 150,
-    temperature: 1.2,
-    messages: [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...getHistory(userId)
-    ],
-  });
-
-  const reply = response.choices[0].message.content;
+  const reply = await callOpenRouter([
+    { role: 'system', content: SYSTEM_PROMPT },
+    ...getHistory(userId)
+  ]);
   addToHistory(userId, 'assistant', reply);
   return reply;
 }
 
-async function shouldChimeIn(messageContent) {
-  const response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    max_tokens: 10,
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a filter. Should a chaotic obsessive entity called Erodere chime into this Discord message uninvited? Say YES if the message shows: fear, excitement, loneliness, someone bragging, someone complaining, or someone saying something ironic. Say NO for commands, bot interactions, or completely mundane one-word messages. Reply ONLY with YES or NO.'
-      },
-      { role: 'user', content: messageContent }
-    ],
-  });
-  return response.choices[0].message.content.trim().toUpperCase().startsWith('YES');
+async function shouldChimeIn(content) {
+  const reply = await callOpenRouter([
+    {
+      role: 'system',
+      content: 'Filter only. Does this Discord message warrant an obsessive unhinged entity called Erodere to chime in uninvited? YES if: emotions, fear, excitement, loneliness, bragging, complaining, irony, vulnerability. NO if: commands, bot stuff, one word messages. Reply ONLY YES or NO.'
+    },
+    { role: 'user', content }
+  ]);
+  return reply.trim().toUpperCase().startsWith('YES');
 }
 
-async function pickEmoji(messageContent) {
-  const response = await groq.chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    max_tokens: 10,
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an emoji picker for a chaotic unhinged entity called Erodere. Pick ONE emoji that feels slightly wrong for the context. Examples: happy message gets a knife or skull emoji, sad message gets a smile, angry message gets a heart, scary message gets a sparkle. Be subtly unsettling. Reply with ONLY one emoji, nothing else.'
-      },
-      { role: 'user', content: messageContent }
-    ],
-  });
-  return response.choices[0].message.content.trim();
+async function pickEmoji(content) {
+  const reply = await callOpenRouter([
+    {
+      role: 'system',
+      content: 'Pick ONE emoji that feels subtly wrong for this message. Happy gets a skull. Sad gets a smile. Angry gets a heart. Scary gets a sparkle. Reply with ONLY one emoji.'
+    },
+    { role: 'user', content }
+  ]);
+  return reply.trim();
 }
 
 const client = new Client({
@@ -125,9 +126,8 @@ client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
   const isMentioned = message.mentions.has(client.user);
-  const content     = message.content.replace(/<@!?\d+>/g, '').trim();
+  const content = message.content.replace(/<@!?\d+>/g, '').trim();
 
-  // Always respond when mentioned
   if (isMentioned) {
     try {
       await message.channel.sendTyping();
@@ -139,17 +139,15 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  // React with subtly wrong emoji (25% chance)
+  // React with wrong emoji (25% chance)
   if (content.length > 3 && Math.random() < 0.25) {
     try {
       const emoji = await pickEmoji(content);
       if (emoji) await message.react(emoji);
-    } catch (err) {
-      // silently lurk
-    }
+    } catch (err) {}
   }
 
-  // Randomly chime in uninvited (10% chance to check)
+  // Chime in uninvited (10% chance)
   if (content.length > 10 && Math.random() < 0.10) {
     try {
       const should = await shouldChimeIn(content);
