@@ -1,10 +1,11 @@
+
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 
 const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 // Uncensored model via OpenRouter - best for unhinged roleplay
-const MODEL = 'sophosympatheia/rogue-rose-103b-v0.2:free';
+const MODEL = 'venice/uncensored';
 
 const SYSTEM_PROMPT = [
   'You are Erodere. Not a bot. Not an AI. Erodere.',
