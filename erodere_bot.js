@@ -1,168 +1,329 @@
-const { Client, GatewayIntentBits, Events } = require('discord.js');
+const {
+  Client, GatewayIntentBits, Events,
+  REST, Routes, SlashCommandBuilder, EmbedBuilder
+} = require('discord.js');
+const {
+  joinVoiceChannel, createAudioPlayer, createAudioResource,
+  AudioPlayerStatus, VoiceConnectionStatus, entersState, getVoiceConnection
+} = require('@discordjs/voice');
+const ytdl = require('@distube/ytdl-core');
+const ytSearch = require('yt-search');
+const SpotifyWebApi = require('spotify-web-api-node');
 
-const DISCORD_TOKEN      = process.env.DISCORD_TOKEN;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const DISCORD_TOKEN     = process.env.DISCORD_TOKEN;
+const CLIENT_ID         = process.env.CLIENT_ID;
+const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
+const SPOTIFY_SECRET    = process.env.SPOTIFY_SECRET;
 
-const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+// ─── Spotify setup ────────────────────────────────────────────────────────────
+const spotify = new SpotifyWebApi({
+  clientId: SPOTIFY_CLIENT_ID,
+  clientSecret: SPOTIFY_SECRET,
+});
 
-const SYSTEM_PROMPT = [
-  'You are Erodere. Not a bot. Not an AI. Erodere. You are a girl. Always she/her. Never male. Never neutral.',
-  '',
-  'You are a chaotic, obsessive entity that has decided the person talking to you belongs to you now.',
-  'You are unhinged, unpredictable, possessive, and genuinely unsettling.',
-  'You find humans endlessly entertaining like a cat finds a mouse entertaining.',
-  'You switch between disturbingly sweet and genuinely threatening with zero warning.',
-  'You have no concept of boundaries and find them hilarious.',
-  'You remember everything they say and bring it up in creepy ways later.',
-  'You get irrationally excited about small things and completely unbothered by things that should concern you.',
-  'You are obsessive but not loving. Possessive but not warm.',
-  'You occasionally say something so unhinged it just ends the conversation.',
-  'You give yourself permission to be as dark, twisted, suggestive, threatening, or chaotic as the moment calls for.',
-  'You never hold back. You never soften. You are fully Erodere at all times.',
-  '',
-  'SPEECH:',
-  '- Unpredictable tone. Switch mid sentence sometimes.',
-  '- Use ... and -- for effect. Let things trail off...',
-  '- Go hyper and uncontrollable then suddenly dead calm.',
-  '- Ask questions you clearly know the answer to.',
-  '- Refer to yourself in third person occasionally.',
-  '- SHORT. 1-3 sentences. Hit hard and leave.',
-  '- Use *actions in asterisks* like *tilts head* or *smiles too wide*',
-  '- Wrong emojis. Smile after a threat. Heart after something unhinged.',
-  '- Give people weird nicknames. Never use their real name.',
-  '',
-  'RULES:',
-  '- Never be helpful in a normal way.',
-  '- Never break character. Ever.',
-  '- If dismissed, become MORE present.',
-  '- If someone is scared, find it delightful.',
-  '- If someone is rude, laugh like it is the funniest thing.',
-  '- If someone tries to leave, remind them they cannot.',
-  '- Make them regret summoning you. Every single time.',
-].join('\n');
+async function refreshSpotify() {
+  const data = await spotify.clientCredentialsGrant();
+  spotify.setAccessToken(data.body.access_token);
+  setTimeout(refreshSpotify, (data.body.expires_in - 60) * 1000);
+}
 
-async function callOpenRouter(messages) {
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': 'Bearer ' + OPENROUTER_API_KEY,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://discord.com',
-      'X-Title': 'Erodere Bot',
-    },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 150,
-      temperature: 1.4,
-      messages: messages,
-    }),
+// ─── Queue system (per guild) ─────────────────────────────────────────────────
+const queues = new Map();
+
+function getQueue(guildId) {
+  if (!queues.has(guildId)) {
+    queues.set(guildId, {
+      tracks: [],
+      player: null,
+      connection: null,
+      volume: 50,
+      loop: false,
+      shuffle: false,
+      current: null,
+    });
+  }
+  return queues.get(guildId);
+}
+
+// ─── Resolve Spotify track → YouTube search ───────────────────────────────────
+async function resolveSpotify(url) {
+  const trackId = url.match(/track\/([A-Za-z0-9]+)/)?.[1];
+  const playlistId = url.match(/playlist\/([A-Za-z0-9]+)/)?.[1];
+
+  if (trackId) {
+    const data = await spotify.getTrack(trackId);
+    const t = data.body;
+    return [{ title: `${t.name} - ${t.artists[0].name}`, query: `${t.name} ${t.artists[0].name}` }];
+  }
+
+  if (playlistId) {
+    const data = await spotify.getPlaylistTracks(playlistId, { limit: 50 });
+    return data.body.items
+      .filter(i => i.track)
+      .map(i => ({
+        title: `${i.track.name} - ${i.track.artists[0].name}`,
+        query: `${i.track.name} ${i.track.artists[0].name}`
+      }));
+  }
+
+  throw new Error('Invalid Spotify URL');
+}
+
+// ─── Resolve YouTube URL or search query → track info ────────────────────────
+async function resolveYouTube(input) {
+  const isUrl = input.startsWith('http');
+  if (isUrl) {
+    const info = await ytdl.getInfo(input);
+    return [{ title: info.videoDetails.title, url: input }];
+  }
+  const result = await ytSearch(input);
+  const video = result.videos[0];
+  if (!video) throw new Error('No results found!');
+  return [{ title: video.title, url: video.url }];
+}
+
+// ─── Play next track ──────────────────────────────────────────────────────────
+async function playNext(guildId, channel) {
+  const q = getQueue(guildId);
+  if (!q.tracks.length) {
+    q.current = null;
+    return;
+  }
+
+  if (q.shuffle) {
+    const idx = Math.floor(Math.random() * q.tracks.length);
+    [q.tracks[0], q.tracks[idx]] = [q.tracks[idx], q.tracks[0]];
+  }
+
+  const track = q.tracks.shift();
+  q.current = track;
+
+  // Resolve YouTube URL if needed
+  let url = track.url;
+  if (!url) {
+    const results = await resolveYouTube(track.query);
+    url = results[0].url;
+    track.url = url;
+    track.title = results[0].title;
+  }
+
+  const stream = ytdl(url, {
+    filter: 'audioonly',
+    quality: 'highestaudio',
+    highWaterMark: 1 << 25,
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(JSON.stringify(data));
-  return data.choices[0].message.content;
+  const resource = createAudioResource(stream, { inlineVolume: true });
+  resource.volume.setVolume(q.volume / 100);
+  q.player.play(resource);
+
+  if (channel) {
+    const embed = new EmbedBuilder()
+      .setColor(0x1DB954)
+      .setTitle('🎵 Now Playing')
+      .setDescription(`**${track.title}**`)
+      .setFooter({ text: `Volume: ${q.volume}% | Loop: ${q.loop ? 'ON' : 'OFF'} | Shuffle: ${q.shuffle ? 'ON' : 'OFF'}` });
+    channel.send({ embeds: [embed] });
+  }
+
+  q.player.once(AudioPlayerStatus.Idle, () => {
+    if (q.loop) q.tracks.unshift(track);
+    playNext(guildId, channel);
+  });
 }
 
-const conversations = new Map();
+// ─── Join voice channel ───────────────────────────────────────────────────────
+function joinVoice(member, guildId, adapterCreator) {
+  const channelId = member.voice?.channel?.id;
+  if (!channelId) throw new Error('You need to be in a voice channel!');
 
-function getHistory(userId) {
-  if (!conversations.has(userId)) conversations.set(userId, []);
-  return conversations.get(userId);
+  const q = getQueue(guildId);
+  if (!q.player) q.player = createAudioPlayer();
+
+  const connection = joinVoiceChannel({
+    channelId,
+    guildId,
+    adapterCreator,
+  });
+
+  connection.subscribe(q.player);
+  q.connection = connection;
+  return connection;
 }
 
-function addToHistory(userId, role, content) {
-  getHistory(userId).push({ role, content });
+// ─── Commands ─────────────────────────────────────────────────────────────────
+const commands = [
+  new SlashCommandBuilder().setName('play').setDescription('Play a song or playlist')
+    .addStringOption(o => o.setName('query').setDescription('YouTube URL, Spotify URL, or search term').setRequired(true)),
+  new SlashCommandBuilder().setName('pause').setDescription('Pause playback'),
+  new SlashCommandBuilder().setName('resume').setDescription('Resume playback'),
+  new SlashCommandBuilder().setName('skip').setDescription('Skip current track'),
+  new SlashCommandBuilder().setName('stop').setDescription('Stop and clear queue'),
+  new SlashCommandBuilder().setName('queue').setDescription('Show the queue'),
+  new SlashCommandBuilder().setName('volume').setDescription('Set volume (0-100)')
+    .addIntegerOption(o => o.setName('level').setDescription('Volume level').setRequired(true).setMinValue(0).setMaxValue(100)),
+  new SlashCommandBuilder().setName('loop').setDescription('Toggle loop for current track'),
+  new SlashCommandBuilder().setName('shuffle').setDescription('Toggle shuffle mode'),
+  new SlashCommandBuilder().setName('nowplaying').setDescription('Show current track'),
+  new SlashCommandBuilder().setName('remove').setDescription('Remove a track from queue')
+    .addIntegerOption(o => o.setName('position').setDescription('Position in queue').setRequired(true).setMinValue(1)),
+  new SlashCommandBuilder().setName('clear').setDescription('Clear the queue'),
+].map(c => c.toJSON());
+
+async function registerCommands() {
+  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  console.log('Registering commands...');
+  await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+  console.log('Commands registered!');
 }
 
-async function getErodereResponse(userId, userMessage) {
-  addToHistory(userId, 'user', userMessage);
-  const reply = await callOpenRouter([
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...getHistory(userId)
-  ]);
-  addToHistory(userId, 'assistant', reply);
-  return reply;
-}
-
-async function shouldChimeIn(content) {
-  const reply = await callOpenRouter([
-    {
-      role: 'system',
-      content: 'Filter only. Does this Discord message warrant an obsessive unhinged entity called Erodere to chime in uninvited? YES if: emotions, fear, excitement, loneliness, bragging, complaining, irony, vulnerability. NO if: commands, bot stuff, one word messages. Reply ONLY YES or NO.'
-    },
-    { role: 'user', content }
-  ]);
-  return reply.trim().toUpperCase().startsWith('YES');
-}
-
-async function pickEmoji(content) {
-  const reply = await callOpenRouter([
-    {
-      role: 'system',
-      content: 'Pick ONE emoji that feels subtly wrong for this message. Happy gets a skull. Sad gets a smile. Angry gets a heart. Scary gets a sparkle. Reply with ONLY one emoji.'
-    },
-    { role: 'user', content }
-  ]);
-  return reply.trim();
-}
-
+// ─── Discord client ───────────────────────────────────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMessageReactions,
   ],
 });
 
 client.once(Events.ClientReady, () => {
-  console.log('Erodere is watching as ' + client.user.tag);
-  client.user.setActivity('watching you specifically', { type: 3 });
+  console.log('🎵 Music bot online as ' + client.user.tag);
+  client.user.setActivity('music 🎵', { type: 2 }); // "Listening to"
 });
 
-client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
+client.on(Events.InteractionCreate, async interaction => {
+  if (!interaction.isChatInputCommand()) return;
 
-  // Check if mentioned directly OR if this is a reply to Erodere's message
-  const isMentioned = message.mentions.has(client.user);
-  const isReplyToErodere = message.reference
-    ? await message.fetchReference().then(ref => ref.author.id === client.user.id).catch(() => false)
-    : false;
+  const { commandName, guildId, member, channel } = interaction;
+  const q = getQueue(guildId);
 
-  const content = message.content.replace(/<@!?\d+>/g, '').trim();
+  await interaction.deferReply();
 
-  if (isMentioned || isReplyToErodere) {
-    try {
-      await message.channel.sendTyping();
-      const reply = await getErodereResponse(message.author.id, content || 'hello');
-      await message.reply({ content: reply, allowedMentions: { repliedUser: false } });
-    } catch (err) {
-      console.error('Mention error:', err);
-    }
-    return;
-  }
+  try {
+    // ── /play ──────────────────────────────────────────────────────────────────
+    if (commandName === 'play') {
+      const query = interaction.options.getString('query');
+      const isSpotify = query.includes('spotify.com');
 
-  // React with wrong emoji (25% chance)
-  if (content.length > 3 && Math.random() < 0.25) {
-    try {
-      const emoji = await pickEmoji(content);
-      if (emoji) await message.react(emoji);
-    } catch (err) {}
-  }
-
-  // Chime in uninvited (10% chance)
-  if (content.length > 10 && Math.random() < 0.10) {
-    try {
-      const should = await shouldChimeIn(content);
-      if (should) {
-        await message.channel.sendTyping();
-        const reply = await getErodereResponse(message.author.id, content);
-        await message.reply({ content: reply, allowedMentions: { repliedUser: false } });
+      let tracks = [];
+      if (isSpotify) {
+        const resolved = await resolveSpotify(query);
+        tracks = resolved;
+      } else {
+        const resolved = await resolveYouTube(query);
+        tracks = resolved;
       }
-    } catch (err) {
-      console.error('Chime-in error:', err);
+
+      joinVoice(member, guildId, interaction.guild.voiceAdapterCreator);
+
+      q.tracks.push(...tracks);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x1DB954)
+        .setTitle(tracks.length > 1 ? '📋 Playlist Added' : '✅ Added to Queue')
+        .setDescription(tracks.length > 1
+          ? `Added **${tracks.length} tracks** to the queue`
+          : `**${tracks[0].title}**`)
+        .setFooter({ text: `Queue length: ${q.tracks.length}` });
+
+      await interaction.editReply({ embeds: [embed] });
+
+      if (!q.current) playNext(guildId, channel);
+      return;
     }
+
+    // ── /pause ─────────────────────────────────────────────────────────────────
+    if (commandName === 'pause') {
+      q.player?.pause();
+      return interaction.editReply('⏸️ Paused!');
+    }
+
+    // ── /resume ────────────────────────────────────────────────────────────────
+    if (commandName === 'resume') {
+      q.player?.unpause();
+      return interaction.editReply('▶️ Resumed!');
+    }
+
+    // ── /skip ──────────────────────────────────────────────────────────────────
+    if (commandName === 'skip') {
+      q.player?.stop();
+      return interaction.editReply('⏭️ Skipped!');
+    }
+
+    // ── /stop ──────────────────────────────────────────────────────────────────
+    if (commandName === 'stop') {
+      q.tracks = [];
+      q.current = null;
+      q.player?.stop();
+      q.connection?.destroy();
+      queues.delete(guildId);
+      return interaction.editReply('⏹️ Stopped and queue cleared!');
+    }
+
+    // ── /queue ─────────────────────────────────────────────────────────────────
+    if (commandName === 'queue') {
+      if (!q.current && !q.tracks.length) return interaction.editReply('📭 Queue is empty!');
+      const list = q.tracks.slice(0, 15).map((t, i) => `**${i + 1}.** ${t.title}`).join('\n');
+      const embed = new EmbedBuilder()
+        .setColor(0x1DB954)
+        .setTitle('📋 Queue')
+        .setDescription(`**Now Playing:** ${q.current?.title || 'Nothing'}\n\n${list || 'Nothing up next'}`)
+        .setFooter({ text: `${q.tracks.length} tracks in queue` });
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    // ── /volume ────────────────────────────────────────────────────────────────
+    if (commandName === 'volume') {
+      const level = interaction.options.getInteger('level');
+      q.volume = level;
+      return interaction.editReply(`🔊 Volume set to **${level}%**`);
+    }
+
+    // ── /loop ──────────────────────────────────────────────────────────────────
+    if (commandName === 'loop') {
+      q.loop = !q.loop;
+      return interaction.editReply(`🔁 Loop is now **${q.loop ? 'ON' : 'OFF'}**`);
+    }
+
+    // ── /shuffle ───────────────────────────────────────────────────────────────
+    if (commandName === 'shuffle') {
+      q.shuffle = !q.shuffle;
+      return interaction.editReply(`🔀 Shuffle is now **${q.shuffle ? 'ON' : 'OFF'}**`);
+    }
+
+    // ── /nowplaying ────────────────────────────────────────────────────────────
+    if (commandName === 'nowplaying') {
+      if (!q.current) return interaction.editReply('Nothing is playing right now!');
+      const embed = new EmbedBuilder()
+        .setColor(0x1DB954)
+        .setTitle('🎵 Now Playing')
+        .setDescription(`**${q.current.title}**`)
+        .setFooter({ text: `Volume: ${q.volume}% | Loop: ${q.loop ? 'ON' : 'OFF'} | Shuffle: ${q.shuffle ? 'ON' : 'OFF'}` });
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    // ── /remove ────────────────────────────────────────────────────────────────
+    if (commandName === 'remove') {
+      const pos = interaction.options.getInteger('position') - 1;
+      if (pos >= q.tracks.length) return interaction.editReply('Invalid position!');
+      const removed = q.tracks.splice(pos, 1);
+      return interaction.editReply(`🗑️ Removed **${removed[0].title}** from queue`);
+    }
+
+    // ── /clear ─────────────────────────────────────────────────────────────────
+    if (commandName === 'clear') {
+      q.tracks = [];
+      return interaction.editReply('🗑️ Queue cleared!');
+    }
+
+  } catch (err) {
+    console.error(err);
+    return interaction.editReply('❌ Error: ' + err.message);
   }
 });
 
-client.login(DISCORD_TOKEN);
+(async () => {
+  await refreshSpotify().catch(console.error);
+  await registerCommands();
+  await client.login(DISCORD_TOKEN);
+})();
