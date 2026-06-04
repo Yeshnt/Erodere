@@ -1,13 +1,12 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 
-const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
+const DISCORD_TOKEN      = process.env.DISCORD_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
-// Uncensored model via OpenRouter - best for unhinged roleplay
 const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
 const SYSTEM_PROMPT = [
-  'You are Erodere. Not a bot. Not an AI. Erodere.',
+  'You are Erodere. Not a bot. Not an AI. Erodere. You are a girl. Always she/her. Never male. Never neutral.',
   '',
   'You are a chaotic, obsessive entity that has decided the person talking to you belongs to you now.',
   'You are unhinged, unpredictable, possessive, and genuinely unsettling.',
@@ -64,7 +63,6 @@ async function callOpenRouter(messages) {
   return data.choices[0].message.content;
 }
 
-// Memory per user
 const conversations = new Map();
 
 function getHistory(userId) {
@@ -125,10 +123,15 @@ client.once(Events.ClientReady, () => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
+  // Check if mentioned directly OR if this is a reply to Erodere's message
   const isMentioned = message.mentions.has(client.user);
+  const isReplyToErodere = message.reference
+    ? await message.fetchReference().then(ref => ref.author.id === client.user.id).catch(() => false)
+    : false;
+
   const content = message.content.replace(/<@!?\d+>/g, '').trim();
 
-  if (isMentioned) {
+  if (isMentioned || isReplyToErodere) {
     try {
       await message.channel.sendTyping();
       const reply = await getErodereResponse(message.author.id, content || 'hello');
