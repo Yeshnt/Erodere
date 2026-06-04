@@ -4,7 +4,7 @@ const DISCORD_TOKEN    = process.env.DISCORD_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 // Uncensored model via OpenRouter - best for unhinged roleplay
-const MODEL = 'z-ai/glm-4.5-air:free';
+const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
 const SYSTEM_PROMPT = [
   'You are Erodere. Not a bot. Not an AI. Erodere.',
